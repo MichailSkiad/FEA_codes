@@ -1,0 +1,49 @@
+ACADEMIC PUBLIC LICENSE (APL)
+Version 1.0 — 2025
+Copyright (c) 2025, Michail Skiadopoulos
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software (the “Software”), to use, reproduce, modify, and distribute the Software and associated documentation files for non-commercial, academic, or research purposes only, subject to the following terms and conditions:
+
+1. Attribution
+Any use of the Software must include appropriate credit to the original author:
+
+“Based on code by Michail Skiadopoulos (2025).”
+Credit must appear in:
+•publications,
+•documentation,
+•derivative works,
+•and any redistributed copies.
+
+2. Non-Commercial Use Only
+The Software may not be used, in whole or in part, for commercial purposes.
+Commercial purposes include (but are not limited to):
+•selling the Software,
+•integrating it into commercial products,
+•providing paid services built upon it,
+•or using it within for-profit environments without written permission.
+
+For commercial licensing, contact: [mixalisskiad@gmail.com].
+
+3. Share-Alike Requirement (Open Modifications)
+Any modifications, adaptations, or derivative works must be released publicly under the same Academic Public License (APL).
+Modified versions must:
+•clearly document the changes, and
+•be made publicly accessible within a reasonable time frame.
+Private forks or closed-source improved versions are not permitted.
+
+4. Redistribution
+Redistribution of the Software, modified or unmodified, is permitted provided that:
+•this license file is included,
+•attribution is preserved,
+•no commercial use is made, and
+•modified versions comply with Section 3 (Share-Alike).
+
+5. No Warranty
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+6. No Transfer of Copyright
+All rights not expressly granted are reserved by the copyright holder.
+This license does not grant ownership or copyright transfer of the Software.
+
+7. Governing Law
+This license shall be governed by and interpreted in accordance with the laws of the country of the copyright holder.
