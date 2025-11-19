@@ -294,8 +294,8 @@ class Mesh_2D:
                                                          E0_ksi * E1_h * D[1] - \
                                                          E1_ksi * E1_h * C[1]
                                                              
-        self.dx = W / self.n_ksi
-        self.dy = H / self.n_h
+        self.dx = self.W / self.n_ksi
+        self.dy = self.H / self.n_h
         
         self.Linear_quad_shape_functions_calc()
                                                              
@@ -976,6 +976,7 @@ Post_processor.plotVar(Mesh, C_e, U, Gauss_points, float_precision)
 #----------------------------------------------------------------------------##
 ###############################################################################
 ###############################################################################
+
 
 
 
