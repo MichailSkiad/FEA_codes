@@ -7,6 +7,9 @@ import numpy as np
 import scipy.sparse as sparse
 import sympy as sp
 import time
+import sys
+import itertools
+import threading
 import matplotlib.pyplot as plt
 from matplotlib import patches
 import matplotlib.cm as cm1
@@ -16,7 +19,7 @@ import matplotlib.ticker as ticker
 ###############################################################################
 def set_numerical_precision():
     
-    numerical_precision = input("Please enter the floating point precision you want to use (single/double): ")
+    numerical_precision = input("Please enter the floating point precision you want to use (single/double): ").lower()
     
     if numerical_precision == "single":
         
@@ -29,6 +32,97 @@ def set_numerical_precision():
         int_precision = np.int64
 
     return int_precision, float_precision;
+###############################################################################
+
+##-------------------------------Progress bar class--------------------------##
+###############################################################################
+class ProgressBar:
+    def __init__(self, total, message):
+        self.total = total
+        self.message = message
+        self.length = 40
+        self.filled_char = "█"
+        self.empty_char  = " "
+        self.time_start = time.time()
+
+    def update(self, iteration):
+
+        percent = iteration / float(self.total)
+        filled = int(self.length * percent)
+
+        current_percent = int(percent * 100)
+
+        bar = self.filled_char * filled + self.empty_char  * (self.length - filled)
+
+        if iteration == 0:
+            
+            sys.stdout.write("\n")
+
+        sys.stdout.write(f"\r{self.message} |{bar}| {current_percent:3d}%")
+        sys.stdout.flush()
+
+        if iteration == self.total:
+            
+            sys.stdout.write(f"\n{self.message}... Done! ✔ | Time taken: {time.time() - self.time_start:.2f} s \n")
+###############################################################################
+
+##-------------------------------Task spinner class--------------------------##
+###############################################################################
+class taskSpinner:
+    def __init__(self, message):
+        self.message = message
+        self.stop_event = threading.Event()
+        self.frames = ["|", "/", "-", "\\"]
+        self.thread = None
+        
+    def __enter__(self):
+
+        self.start()
+        
+        return self;
+
+    def __exit__(self, exc_type, exc_value, tb):
+
+        self.completed = exc_type is None
+        self.stop()
+
+    def start(self):
+        
+        def animate():
+            
+            sys.stdout.write("\n")
+            
+            for c in itertools.cycle(self.frames):
+                
+                if self.stop_event.is_set():
+                    
+                    break
+                
+                sys.stdout.write(f'\r{self.message}... {c}')
+                sys.stdout.flush()
+                
+                if self.stop_event.wait(0.1):
+                    
+                    break
+               
+            if self.completed:
+                
+                sys.stdout.write(f'\r{self.message}... Done! ✔️\n')
+                
+            else:
+                
+                sys.stdout.write(f'\r{self.message}... Failed ✖\n')                
+
+        self.thread = threading.Thread(target=animate, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        
+        self.stop_event.set()
+        
+        if self.thread and self.thread.is_alive():
+            
+            self.thread.join(timeout=0.2)
 ###############################################################################
 
 ##-------------------------Get domain geometry function----------------------##
@@ -118,7 +212,10 @@ def get_material_properties(float_precision):
     print(f"    Young's Modulus: {E / 1e9:.2f}e⁹ (Pa)")
     print(f"    Poisson ratio: {v:.2f}")  
     
-    return E, v;
+    Mat = {"E": E,
+           "v": v}
+    
+    return Mat;
 ###############################################################################
 
 ##-------------------------------Mesher class--------------------------------##
@@ -136,6 +233,14 @@ class Mesh_2D:
         self.dy = dy
         
         self.elemType = elemType
+        
+        if (self.elemType["shape"], self.elemType["order"]) == ("quad", "linear"):
+            
+            self.elem_nDOFs = 8
+            
+        elif (self.elemType["shape"], self.elemType["order"]) == ("quad", "second order"):
+            
+            self.elem_nDOFs = 16
         
         return;
     
@@ -190,6 +295,60 @@ class Mesh_2D:
     
         return; 
         
+        
+    def insert_mid_nodes(self, int_precision, float_precision):
+        
+        self.elems_to_nodes = self.elems_to_nodes.tolist()
+        
+        self.nodal_coords = self.nodal_coords.tolist()
+        
+        edge_to_mid = {}
+        
+        progressBar = ProgressBar(self.n_ksi * self.n_h, "Inserting midside nodes")
+        progressBar.update(0)        
+        
+        for elem_counter, elem in enumerate(self.elems_to_nodes):
+        
+            edges = [(elem[k], elem[(k+1) % len(elem)]) for k in range(len(elem))]
+            
+            mid_nodes = []
+            
+            for (i, j) in edges:
+                
+                key = tuple(sorted((i, j)))
+                
+                if key in edge_to_mid:
+                    
+                    mid_node = edge_to_mid[key]
+                    
+                else:
+                    
+                    mid_node = len(self.nodal_coords)
+                    
+                    self.nodes_to_elems.append(set())
+                    
+                    self.nodal_coords.append([0.5 * (self.nodal_coords[i][0] + self.nodal_coords[j][0]), 
+                                              0.5 * (self.nodal_coords[i][1] + self.nodal_coords[j][1])])
+                    
+                    edge_to_mid[key] = mid_node
+                    
+                self.nodes_to_elems[mid_node].add(elem_counter)
+                
+                mid_nodes.append(mid_node)
+        
+            self.elems_to_nodes[elem_counter].extend(mid_nodes)
+            
+            if (elem_counter + 1) % 10 == 0:
+                progressBar.update(elem_counter + 1)
+                
+            elif elem_counter == self.n_ksi * self.n_h - 1: 
+                progressBar.update(elem_counter + 1)
+        
+        self.elems_to_nodes = np.array(self.elems_to_nodes, dtype = int_precision)
+        self.nodal_coords = np.array(self.nodal_coords, dtype = float_precision)        
+        
+        return;
+        
     def Linear_quad_shape_functions_calc(self, ):
             
         ksi, h = sp.symbols('ksi h') 
@@ -226,6 +385,58 @@ class Mesh_2D:
         
         return;
         
+    def Second_order_quad_shape_functions_calc(self, ):
+            
+        ksi, h = sp.symbols('ksi h') 
+            
+        self.ksi = ksi
+        self.h = h
+        
+        N1 =  (1 - ksi) * (1 - h) * (-ksi - h - 1) / 4
+        N2 = (1 + ksi) * (1 - h) * (ksi - h - 1) / 4
+        N3 = (1 + ksi) * (1 + h) * (ksi + h - 1) / 4
+        N4 = (1 - ksi) * (1 + h) * (-ksi + h - 1) / 4
+        N5 = (1 - ksi ** 2) * (1 - h) / 2
+        N6 = (1 + ksi) * (1 - h ** 2) / 2
+        N7 = (1 - ksi ** 2) * (1 + h) / 2
+        N8 = (1 - ksi) * (1 - h ** 2) / 2
+
+        N = sp.Matrix([[N1, N2, N3, N4, N5, N6, N7, N8, 0, 0, 0, 0, 0, 0, 0, 0],
+                       [0, 0, 0, 0, 0, 0, 0, 0, N1, N2, N3, N4, N5, N6, N7, N8]])        
+
+        self.N_function = sp.lambdify((ksi, h), N, 'numpy')
+        
+        dN1_dksi = sp.diff(N1, ksi)
+        dN1_dh = sp.diff(N1, h)
+        
+        dN2_dksi = sp.diff(N2, ksi)
+        dN2_dh = sp.diff(N2, h)
+        
+        dN3_dksi = sp.diff(N3, ksi)
+        dN3_dh = sp.diff(N3, h)
+        
+        dN4_dksi = sp.diff(N4, ksi)
+        dN4_dh = sp.diff(N4, h)
+        
+        dN5_dksi = sp.diff(N5, ksi)
+        dN5_dh = sp.diff(N5, h)
+        
+        dN6_dksi = sp.diff(N6, ksi)
+        dN6_dh = sp.diff(N6, h)
+        
+        dN7_dksi = sp.diff(N7, ksi)
+        dN7_dh = sp.diff(N7, h)
+        
+        dN8_dksi = sp.diff(N8, ksi)
+        dN8_dh = sp.diff(N8, h)
+
+        dN_dksi_dh = [[dN1_dksi, dN2_dksi, dN3_dksi, dN4_dksi, dN5_dksi, dN6_dksi, dN7_dksi, dN8_dksi],
+                      [dN1_dh, dN2_dh, dN3_dh, dN4_dh, dN5_dh, dN6_dh, dN7_dh, dN8_dh]]
+        
+        self.dN_dksi_dh_function = sp.lambdify((ksi, h), dN_dksi_dh, 'numpy')
+        
+        return;
+        
     def J_matrix_assembly(self, dN_dksi_dh, X):
         
         J = dN_dksi_dh @ X        
@@ -238,16 +449,16 @@ class Mesh_2D:
         
         BB = inv_J @ dN_dksi_dh
         
-        B = np.stack([np.concatenate([BB[0, :], np.zeros(4, )]),
-                      np.concatenate([np.zeros(4, ), BB[1, :]]),
+        B = np.stack([np.concatenate([BB[0, :], np.zeros(self.elem_nDOFs // 2, )]),
+                      np.concatenate([np.zeros(self.elem_nDOFs // 2, ), BB[1, :]]),
                       np.concatenate([BB[1, :], BB[0, :]])])
         
         return B;
        
     def node_element_generation(self, int_precision, float_precision):
         
-        self.n_ksi = int_precision(self.W / self.dx)
-        self.n_h = int_precision(self.H / self.dy)
+        self.n_ksi = int_precision(max(self.W / self.dx, 1))
+        self.n_h = int_precision(max(self.H / self.dy, 1))
         
         self.num_nodes = (self.n_ksi + 1) * (self.n_h + 1)
         
@@ -259,6 +470,9 @@ class Mesh_2D:
         self.Coons(int_precision, float_precision)
         
         self.nodal_coords = np.zeros((self.num_nodes, 2), dtype = float_precision)
+        
+        progressBar = ProgressBar(self.n_ksi * self.n_h, "Generating Mesh")
+        progressBar.update(0)
         
         for i in range(0, self.n_ksi * self.n_h):
             for j in range(0, 4):
@@ -293,18 +507,34 @@ class Mesh_2D:
                                                          E1_ksi * E0_h * B[1] - \
                                                          E0_ksi * E1_h * D[1] - \
                                                          E1_ksi * E1_h * C[1]
+                        
+            if (i + 1) % 10 == 0:
+                progressBar.update(i + 1)
+                
+            elif i == self.n_ksi * self.n_h - 1: 
+                progressBar.update(i + 1)
                                                              
         self.dx = self.W / self.n_ksi
         self.dy = self.H / self.n_h
         
-        self.Linear_quad_shape_functions_calc()
+        if (self.elemType["shape"], self.elemType["order"]) == ("quad", "linear"):
+            
+            self.Linear_quad_shape_functions_calc()
+            
+        elif (self.elemType["shape"], self.elemType["order"]) == ("quad", "second order"):
+            
+            self.insert_mid_nodes(int_precision, float_precision)
+            
+            self.Second_order_quad_shape_functions_calc()
+            
+            self.num_nodes = self.nodal_coords.shape[0]
                                                              
         return;
 ###############################################################################
 
 ##-------------------------Generate mesh function----------------------------##
 ###############################################################################
-def generate_Mesh(H, W, E, v, int_precision, float_precision):
+def generate_Mesh(H, W, int_precision, float_precision):
     
     print("Please provide the element size\n")
     
@@ -313,47 +543,60 @@ def generate_Mesh(H, W, E, v, int_precision, float_precision):
     dy = elementSize
     
     valid_elementShapes = ['Quad']
+    valid_elementOrders = ['Linear', 'Second order']
     valid_matModels = ['Plane strain', 'Plane stress']
     
-    print("\nPlease provide the element type\n")
+    print("\nPlease provide the element shape\n")
     print("Available element shapes: ", valid_elementShapes)
-    elementShape = input("Enter element shape: ")
+    elementShape = input("Enter element shape: ").lower()
+    
+    print("\nPlease provide the element order\n")
+    print("Available element orders: ", valid_elementOrders)
+    elementOrder = input("Enter element order: ").lower()  
     
     print("\nAvailable material models: ", valid_matModels)
-    matModel = input("Enter material model: ")
+    matModel = input("Enter material model: ").lower()
     
-    elemType = {'shape': elementShape, 'matModel': matModel}
-    
-    time_start = time.time()
+    elemType = {'shape': elementShape, 'order': elementOrder, 'matModel': matModel}
     
     Mesh = Mesh_2D(H, W, dx, dy, elemType)
     Mesh.node_element_generation(int_precision, float_precision)
     
-    print("\nMeshing is complete | Time taken: %.2f s\n" %(time.time() - time_start))
-    
-    plt.figure(1, figsize = (40, 40 * (Mesh.H / Mesh.W)))
-    ax = plt.axes()
-    
-    filled_rect = patches.Rectangle((0.0, 0.0),
-                                    W,
-                                    H,
-                                    facecolor='cyan',
-                                    edgecolor='cyan',
-                                    linewidth=0,
-                                    zorder=0)
-    
-    ax.add_patch(filled_rect)
-    
-    for elem in Mesh.elems_to_nodes:
-    
-        plt.plot(np.append(Mesh.nodal_coords[elem, 0], Mesh.nodal_coords[elem[0], 0]), np.append(Mesh.nodal_coords[elem, 1], Mesh.nodal_coords[elem[0], 1]), linewidth = 1, color = "black")
-    
-    plt.tick_params(axis='both', which='major', labelsize = 40)
-    plt.xlabel('x', fontsize = 40, fontweight = "bold")
-    plt.ylabel('y', fontsize = 40, fontweight = "bold")
-    
-    ax.margins(0.06)
-    ax.set_aspect("equal", adjustable="box")
+    with taskSpinner("Visualizing mesh"):
+        
+        plt.figure(1, figsize = (40, 40 * (Mesh.H / Mesh.W)))
+        ax = plt.axes()
+        
+        filled_rect = patches.Rectangle((0.0, 0.0),
+                                        W,
+                                        H,
+                                        facecolor='cyan',
+                                        edgecolor='cyan',
+                                        linewidth=0,
+                                        zorder=0)
+        
+        ax.add_patch(filled_rect)
+        
+        for elem in Mesh.elems_to_nodes:
+            
+            if len(elem) in (4, 8):
+                
+                corner_nodes = elem[:4].copy()
+                
+                mid_nodes = elem[4:].copy()
+                
+                plt.plot(np.append(Mesh.nodal_coords[corner_nodes, 0], Mesh.nodal_coords[corner_nodes[0], 0]), np.append(Mesh.nodal_coords[corner_nodes, 1], Mesh.nodal_coords[corner_nodes[0], 1]), linewidth = 1, linestyle = "-", marker = "o", color = "black")
+        
+                if len(mid_nodes) != 0:
+                    
+                    plt.plot(Mesh.nodal_coords[mid_nodes, 0], Mesh.nodal_coords[mid_nodes, 1], linestyle = "none", marker = "o", color = "black")
+                    
+        plt.tick_params(axis='both', which='major', labelsize = 40)
+        plt.xlabel('x', fontsize = 40, fontweight = "bold")
+        plt.ylabel('y', fontsize = 40, fontweight = "bold")
+        
+        ax.margins(0.06)
+        ax.set_aspect("equal", adjustable="box")
 
     return Mesh;
 ###############################################################################
@@ -362,34 +605,58 @@ def generate_Mesh(H, W, E, v, int_precision, float_precision):
 ###############################################################################
 def Gauss_points_selection_2D(float_precision):
     
-    valind_n_Gauss_points = [2, ]
+    valind_n_Gauss_points = [1, 2, 3]
     
-    print("\nPlease provide the number of Gauss points used for integration\n")
+    print("\nPlease provide the number of Gauss points used for integration")
     print("Available number of Gauss points: ", valind_n_Gauss_points)
+
+    print(f"\nSelected element order: {Mesh.elemType['order']}")
+    print("For this element type, it is recommended to use:")
+    
+    if Mesh.elemType["order"] == "linear":
+    
+        print(" - 1 Gauss point per direction for reduced integration (lower computational cost & better handling of distorted elements)")
+        print(" - 2 Gauss points per direction for full integration, which mitigates hourglass (zero-energy) modes")
+    
+    elif Mesh.elemType["order"] == "second order":
+    
+        print(" - 2 Gauss points per direction for reduced integration (lower computational cost & better handling of distorted elements)")
+        print(" - 3 Gauss points per direction for full integration, which mitigates hourglass (zero-energy) modes")
     
     n_Gauss_points = int(input("Enter the number of Gauss points: "))
+    
+    if n_Gauss_points == 1:
+        
+        Gauss_points = {"vals": [float_precision(0.0), ],
+                        "weights": [float_precision(2.0), ]}
 
     if n_Gauss_points == 2:
         
-        Gauss_points = {"vals": [1.0 / np.sqrt(3.0, dtype = float_precision), -1.0 / np.sqrt(3.0, dtype = float_precision)],
-                        "weights": [1.0, 1.0]}
+        Gauss_points = {"vals": [np.sqrt(1.0 / 3.0, dtype = float_precision), -np.sqrt(1.0 / 3.0, dtype = float_precision)],
+                        "weights": [float_precision(1.0), float_precision(1.0)]}
+        
+    if n_Gauss_points == 3:
+        
+        Gauss_points = {"vals": [float_precision(0.0), np.sqrt(3.0 / 5.0, dtype = float_precision), -np.sqrt(3.0 / 5.0, dtype = float_precision)],
+                        "weights": [float_precision(8.0 / 9.0), float_precision(5.0 / 9.0), float_precision(5.0 / 9.0)]}
 
     return Gauss_points;
 ###############################################################################
 
 ##----------------------Stifness matrix assembly function--------------------##
 ###############################################################################
-def Global_Stifness_matrix_assembly_2D(E, v, D, Mesh, Gauss_points, float_precision):
+def Global_Stifness_matrix_assembly_2D(Mat, D, Mesh, Gauss_points, float_precision):
     
-    time_start = time.time()
+    E = Mat["E"]
+    v = Mat["v"]
     
-    if Mesh.elemType['matModel'] == 'Plane stress':
+    if Mesh.elemType['matModel'] == 'plane stress':
         
         C_e = (E / (1.0 - v ** 2)) * np.array([[1, v, 0],
                                                [v, 1, 0],
                                                [0, 0, (1 - v)/ 2.0]], dtype = np.float32)
         
-    elif Mesh.elemType['matModel'] == 'Plane strain':
+    elif Mesh.elemType['matModel'] == 'plane strain':
         
         C_e = (E * (1.0 - v) / ((1.0 + v) * (1.0 - 2.0 * v))) * np.array([[1, v / (1.0 - v), 0],
                                                                           [v / (1.0 - v), 1, 0],
@@ -402,13 +669,16 @@ def Global_Stifness_matrix_assembly_2D(E, v, D, Mesh, Gauss_points, float_precis
     cols = []
     vals = []
     
-    for elem in Mesh.elems_to_nodes:
+    progressBar = ProgressBar(Mesh.n_ksi * Mesh.n_h, "Assembling Global Stifness matrix")
+    progressBar.update(0)    
+    
+    for elem_counter, elem in enumerate(Mesh.elems_to_nodes):
         
         index = np.concatenate([elem, elem + Mesh.num_nodes])
         
         X = Mesh.nodal_coords[elem]
         
-        Local = np.zeros((8, 8))
+        Local = np.zeros((Mesh.elem_nDOFs, Mesh.elem_nDOFs))
         
         for i in range(len(Gauss_points_vals)):
             for j in range(len(Gauss_points_vals)):
@@ -426,10 +696,14 @@ def Global_Stifness_matrix_assembly_2D(E, v, D, Mesh, Gauss_points, float_precis
         rows.extend(np.repeat(index, index.shape[0]))
         cols.extend(np.tile(index, index.shape[0]))
         vals.extend(Local.ravel())
+        
+        if (elem_counter + 1) % 100 == 0:
+            progressBar.update(elem_counter + 1)
+            
+        elif elem_counter == Mesh.n_ksi * Mesh.n_h - 1: 
+            progressBar.update(elem_counter + 1)
 
     K = sparse.coo_matrix((vals, (rows, cols)), shape=(2 * Mesh.num_nodes, 2 * Mesh.num_nodes), dtype = float_precision).tocsr()
-
-    print("Global Stifness matrix is assembled | Time taken: %.2f s\n" %(time.time() - time_start))
 
     return C_e, K;
 ###############################################################################
@@ -442,9 +716,9 @@ def Vertices_Edge_constraints(Mesh, int_precision, float_precision):
     
     free_DOFs = np.arange(2 * Mesh.num_nodes, dtype = int_precision)
     
-    vertice_constraint_ON = input("\nState if you want to constraint a vertice (Y/N): ")
+    vertice_constraint_ON = input("\nState if you want to constraint a vertice (Y/N): ").lower()
 
-    if vertice_constraint_ON == "Y":
+    if vertice_constraint_ON == "y":
         
         n_vertice_constraints = int_precision(input("\nEnter how many vertices are constrained: "))
             
@@ -452,7 +726,7 @@ def Vertices_Edge_constraints(Mesh, int_precision, float_precision):
 
             vertice_coords = [float_precision(j) for j in input(f"\nEnter x, y (separated by spaces or commas) for vertice {i + 1:d}: ").replace(",", " ").split()]
             
-            DOFs_constrained = input("State which DOFs are constrained (x, y, both): ")
+            DOFs_constrained = input("State which DOFs are constrained (x, y, both): ").lower()
             
             mask_vertice = (Mesh.nodal_coords[:, 0] >= vertice_coords[0] - Mesh.dx / 4.0) & (Mesh.nodal_coords[:, 0] <= vertice_coords[0] + Mesh.dx / 4.0) & (Mesh.nodal_coords[:, 1] >= vertice_coords[1] - Mesh.dy / 4.0) & (Mesh.nodal_coords[:, 1] <= vertice_coords[1] + Mesh.dy / 4.0)
 
@@ -470,9 +744,9 @@ def Vertices_Edge_constraints(Mesh, int_precision, float_precision):
                 
                 fixed_DOFs.extend(np.append(vertice_constraint_node_indices, vertice_constraint_node_indices + Mesh.num_nodes))
 
-    edge_constraint_ON = input("\nState if you want to constrain an edge (Y/N): ")
+    edge_constraint_ON = input("\nState if you want to constrain an edge (Y/N): ").lower()
     
-    if edge_constraint_ON == "Y":
+    if edge_constraint_ON == "y":
         
         n_edge_constraints = int_precision(input("\nEnter how many edges are constrained: "))
         
@@ -480,7 +754,7 @@ def Vertices_Edge_constraints(Mesh, int_precision, float_precision):
             
             edge_coords = [float_precision(j) for j in input(f"\nEnter xMin, yMin, xMax, yMax (separated by spaces or commas) for edge {i + 1:d}: ").replace(",", " ").split()]
             
-            DOFs_constrained = input("State which DOFs are constrained (x, y, both): ")
+            DOFs_constrained = input("State which DOFs are constrained (x, y, both): ").lower()
             
             mask_edge = (Mesh.nodal_coords[:, 0] >= edge_coords[0] - Mesh.dx / 4.0) & (Mesh.nodal_coords[:, 0] <= edge_coords[2] + Mesh.dx / 4.0) & (Mesh.nodal_coords[:, 1] >= edge_coords[1] - Mesh.dy / 4.0) & (Mesh.nodal_coords[:, 1] <= edge_coords[3] + Mesh.dy / 4.0)
         
@@ -534,17 +808,41 @@ def Edges_loads(Mesh, loaded_DOFs, F, Gauss_points, int_precision, float_precisi
     Gauss_points_vals = Gauss_points["vals"]
     Gauss_points_weights = Gauss_points["weights"]
     
-    edge_meta = {(0,1): {"const": "h", "const_val": -1.0, "J_row": 0},
-                 (1,0): {"const": "h", "const_val": -1.0, "J_row": 0},
+    if (Mesh.elemType["shape"], Mesh.elemType["order"]) == ("quad", "linear"):
     
-                (1,2): {"const": "ksi",  "const_val": +1.0, "J_row": 1},
-                (2,1): {"const": "ksi",  "const_val": +1.0, "J_row": 1},
-            
-                (2,3): {"const": "h", "const_val": +1.0, "J_row": 0},
-                (3,2): {"const": "h", "const_val": +1.0, "J_row": 0},
-            
-                (3,0): {"const": "ksi",  "const_val": -1.0, "J_row": 1},
-                (0,3): {"const": "ksi",  "const_val": -1.0, "J_row": 1}}
+        edge_meta = {(0, 1): {"const": "h", "const_val": -1.0, "J_row": 0, "ab": (-1.0, 1.0)},
+        
+                    (1, 2): {"const": "ksi",  "const_val": +1.0, "J_row": 1, "ab": (-1.0, 1.0)},
+                
+                    (2, 3): {"const": "h", "const_val": +1.0, "J_row": 0, "ab": (-1.0, 1.0)},
+    
+                    (0, 3): {"const": "ksi",  "const_val": -1.0, "J_row": 1, "ab": (-1.0, 1.0)}}
+        
+    elif (Mesh.elemType["shape"], Mesh.elemType["order"]) == ("quad", "second order"):
+        
+        edge_meta = {(0, 1, 4): {"const": "h", "const_val": -1.0, "J_row": 0, "ab": (-1.0, 1.0)},
+                     
+                     (0, 4): {"const": "h", "const_val": -1.0, "J_row": 0, "ab": (-1.0, 0.0)},
+                     
+                     (1, 4): {"const": "h", "const_val": -1.0, "J_row": 0, "ab": (0.0, 1.0)},
+        
+                    (1, 2, 5): {"const": "ksi",  "const_val": +1.0, "J_row": 1, "ab": (-1.0, 1.0)},
+                    
+                    (1, 5): {"const": "ksi",  "const_val": +1.0, "J_row": 1, "ab": (-1.0, 0.0)},
+                    
+                    (2, 5): {"const": "ksi",  "const_val": +1.0, "J_row": 1, "ab": (0.0, 1.0)},
+                
+                    (2, 3, 6): {"const": "h", "const_val": +1.0, "J_row": 0, "ab": (-1.0, 1.0)},
+                    
+                    (2, 6): {"const": "h", "const_val": +1.0, "J_row": 0, "ab": (0.0, 1.0)},
+                    
+                    (3, 6): {"const": "h", "const_val": +1.0, "J_row": 0, "ab": (-1.0, 0.0)},
+    
+                    (0, 3, 7): {"const": "ksi",  "const_val": -1.0, "J_row": 1, "ab": (-1.0, 1.0)},
+                    
+                    (0, 7): {"const": "ksi",  "const_val": -1.0, "J_row": 1, "ab": (-1.0, 0.0)},
+                    
+                    (3, 7): {"const": "ksi",  "const_val": -1.0, "J_row": 1, "ab": (0.0, 1.0)}}        
     
     n_edge_load = int_precision(input("\nEnter how many edges are loaded: "))
         
@@ -554,43 +852,57 @@ def Edges_loads(Mesh, loaded_DOFs, F, Gauss_points, int_precision, float_precisi
         
         mask_edge = (Mesh.nodal_coords[:, 0] >= edge_coords[0] - Mesh.dx / 4.0) & (Mesh.nodal_coords[:, 0] <= edge_coords[2] + Mesh.dx / 4.0) & (Mesh.nodal_coords[:, 1] >= edge_coords[1] - Mesh.dy / 4.0) & (Mesh.nodal_coords[:, 1] <= edge_coords[3] + Mesh.dy / 4.0)
 
-        edge_load_node_indices = np.where(mask_edge == True)[0]
+        edge_load_node_indices = set(np.where(mask_edge == True)[0])
         
         qx =  float_precision(input("Enter signed amplitude of x-component in (N/m): "))
-        qy =  float_precision(input("Enter signed amplitude of y-component in (N/m): "))
+        qy =  float_precision(input("Enter signed amplitude of y-component in (N/m): ")) 
+
+        e_loaded = set().union(*(Mesh.nodes_to_elems[n] for n in edge_load_node_indices))
         
-        for i in range(edge_load_node_indices.shape[0] - 1):
-            
-            e = list(Mesh.nodes_to_elems[edge_load_node_indices[i]] & Mesh.nodes_to_elems[edge_load_node_indices[i + 1]])[0]
+        for e in e_loaded:
             
             elem = Mesh.elems_to_nodes[e]
             
-            n1 = int(np.where(elem == edge_load_node_indices[i])[0][0])
-            n2 = int(np.where(elem == edge_load_node_indices[i + 1])[0][0])
+            n_loaded = tuple([j for j in range(elem.shape[0]) if elem[j] in edge_load_node_indices])
             
-            X = Mesh.nodal_coords[elem]
-
-            for Gauss_points_val, Gauss_points_weight in zip(Gauss_points_vals, Gauss_points_weights):
+            if len(n_loaded) >= 2:
                 
-                if edge_meta[(n1, n2)]["const"] == "ksi":
+                elem_DOFs = np.append(elem, elem + Mesh.num_nodes)
+                
+                X = Mesh.nodal_coords[elem]
+                
+                edge_data = edge_meta[n_loaded]
+                
+                q = np.array([qx, qy])
+    
+                half = 0.5 * (edge_data["ab"][1] - edge_data["ab"][0])
+                mid = 0.5 * (edge_data["ab"][1] + edge_data["ab"][0])
+                
+                J_row = edge_meta[n_loaded]["J_row"]
+    
+                for Gauss_points_val, Gauss_points_weight in zip(Gauss_points_vals, Gauss_points_weights):
                     
-                    ksi = edge_meta[(n1, n2)]["const_val"]
-                    h = Gauss_points_val
-                
-                elif edge_meta[(n1, n2)]["const"] == "h":
+                    if edge_data["const"] == "ksi":
+                        
+                        ksi = edge_data["const_val"]
+                        h = half * Gauss_points_val + mid
                     
-                    ksi = Gauss_points_val
-                    h = edge_meta[(n1, n2)]["const_val"]
+                    elif edge_data["const"] == "h":
+                        
+                        ksi = half * Gauss_points_val + mid
+                        h = edge_data["const_val"]
+                        
+                    w = half * Gauss_points_weight
+                
+                    N = Mesh.N_function(ksi, h)
                     
-                J_row = edge_meta[(n1, n2)]["J_row"]
-                
-                N = Mesh.N_function(ksi, h)
-                
-                dN_dksi_dh = Mesh.dN_dksi_dh_function(ksi, h)
-                
-                J = Mesh.J_matrix_assembly(dN_dksi_dh, X)
-                
-                F[np.append(elem, elem + Mesh.num_nodes)] += Gauss_points_weight * (N.T @ np.append(qx, qy)) * np.sqrt(np.sum(J[J_row] ** 2))
+                    dN_dksi_dh = Mesh.dN_dksi_dh_function(ksi, h)
+                    
+                    J = Mesh.J_matrix_assembly(dN_dksi_dh, X)
+                    
+                    F[elem_DOFs] += w * (N.T @ q) * np.sqrt(np.sum(J[J_row] ** 2)) 
+                    
+    edge_load_node_indices = np.array(list(edge_load_node_indices))
     
     if qx != 0:
         
@@ -608,15 +920,15 @@ def loads(Mesh, Gauss_points, int_precision, float_precision):
         
     F = np.zeros(2 * Mesh.num_nodes, dtype = float_precision)       
     
-    vertice_load_ON = input("\nPlease state if you want to load a vertice (Y/N): ")
+    vertice_load_ON = input("\nPlease state if you want to load a vertice (Y/N): ").lower()
     
-    if vertice_load_ON == "Y":
+    if vertice_load_ON == "y":
         
-        loaded_DOFs, F = Vertices_loads(Mesh, loaded_DOFs, F, Gauss_points, int_precision, float_precision)
+        loaded_DOFs, F = Vertices_loads(Mesh, loaded_DOFs, F, int_precision, float_precision)
         
-    edge_load_ON = input("\nPlease if you want to load an edge (Y/N): ")
+    edge_load_ON = input("\nPlease state if you want to load an edge (Y/N): ").lower()
     
-    if edge_load_ON == "Y":
+    if edge_load_ON == "y":
         
         loaded_DOFs, F = Edges_loads(Mesh, loaded_DOFs, F, Gauss_points, int_precision, float_precision)
 
@@ -624,9 +936,9 @@ def loads(Mesh, Gauss_points, int_precision, float_precision):
 
 def BC_loads(Mesh, Gauss_points, int_precision, float_precision):
     
-    BC_ON = input("Please state if kinematic constraints will be imposed on the model (Y/N): ")    
+    BC_ON = input("\nPlease state if kinematic constraints will be imposed on the model (Y/N): ").lower()
     
-    if BC_ON == "Y":
+    if BC_ON == "y":
         
         fixed_DOFs, free_DOFs = Vertices_Edge_constraints(Mesh, int_precision, float_precision)
         
@@ -717,20 +1029,16 @@ def BC_loads(Mesh, Gauss_points, int_precision, float_precision):
 ###############################################################################
 def solve(K, free_DOFs, F, float_precision):
     
-    print("Solution started\n")
+    with taskSpinner("Solving"):
     
-    time_start = time.time()
-    
-    U = np.zeros(2 * Mesh.num_nodes, float_precision)
-    
-    K_effective = K[np.ix_(free_DOFs, free_DOFs)].copy()
-    K_effective_LU = sparse.linalg.splu(K_effective)
-    
-    F_effective = F[free_DOFs].copy()
-    
-    U[free_DOFs] = K_effective_LU.solve(F_effective)
+        U = np.zeros(2 * Mesh.num_nodes, float_precision)
         
-    print("\nSolution is completed | Time taken: %.2f s\n" %(time.time() - time_start))
+        K_effective = K[np.ix_(free_DOFs, free_DOFs)].copy()
+        K_effective_LU = sparse.linalg.splu(K_effective)
+        
+        F_effective = F[free_DOFs].copy()
+        
+        U[free_DOFs] = K_effective_LU.solve(F_effective)
     
     return U;
 ###############################################################################
@@ -746,8 +1054,37 @@ class Post_processing2D:
         
         self.my_cmap = cm1.jet
         
-        self.Var_list = ['Ux', 'Uy', 'U_abs', 'Sxx', 'Syy', 'Sxy', 'S_VonMises']
-        self.Var_units_list = ['(m)', '(m)', '(m)', '(Pa)', '(Pa)', '(Pa)', '(Pa)']
+        self.Var_dict = {"ux": {"Name": "Ux", "Units": "(m)"},
+                         "uy": {"Name": "Uy", "Units": "(m)"},
+                         "u_abs": {"Name": "U_abs", "Units": "(m)"},
+                         "sxx": {"Name": "Sxx", "Units": "(Pa)"},
+                         "syy": {"Name": "Syy", "Units": "(Pa)"},
+                         "sxy": {"Name": "Sxy", "Units": "(Pa)"},
+                         "s_vonmises": {"Name": "S_VonMises", "Units": "(Pa)"}}
+        
+        return;
+        
+    def save_plot(self,):
+        
+        save_plot_ON = input("\nState if you want to save an image of the plot (Y/N): ").lower()
+    
+        if save_plot_ON == "y":
+            
+            image_name = input("\nProvide a filename for the saved image (without extensions): ")
+            
+            valid_image_formats = ["jpg", "jpeg", "png", "tiff", "svg"]
+            print("\nAvailable image formats: ", valid_image_formats)
+            image_format = input("Enter your preferred image format: ").lower()
+            
+            print("\nProvide the preferred resolution in Dots per Inches (DPI)")
+            print("Higher DPI produces a sharper, higher-quality image")
+            print("It is recommended to enter an integer value between 100 and 400")
+            dpi = int_precision(input("\nEnter your preferred resolution (DPI): "))
+            
+            with taskSpinner("Saving image"):
+                
+                plt.savefig(f"{image_name}.{image_format}", format = image_format.lower(), 
+                            bbox_inches = 'tight', dpi = dpi)
         
         return;
         
@@ -755,106 +1092,141 @@ class Post_processing2D:
         
         Gauss_points_vals = Gauss_points["vals"]
         
-        print("Available variables to plot: ", self.Var_list)
-        Var = input("Enter the variable you want to plot: ")
+        print("Available variables to plot: ", [self.Var_dict[var]["Name"] for var in self.Var_dict])
+        Var = input("Enter the variable you want to plot: ").lower()
         
-        show_mesh = input("\nState if you want to plot the mesh (Y/N): ") 
+        show_mesh = input("\nState if you want to plot the mesh (Y/N): ").lower()
         
-        deformed = input("\nState if you want to plot the deformed configuration (Y/N): ")
+        deformed = input("\nState if you want to plot the deformed configuration (Y/N): ").lower()
         
-        if show_mesh == "Y":
+        if show_mesh == "y":
             
             show_mesh = True
         
-        if deformed == "Y":
+        if deformed == "y":
             
             deformed = True
             
             exaggerationFactor = 0
-            exaggeration_ON = input("State if you want to plot an exaggerate deformed configuration (Y/N): ")
+            exaggeration_ON = input("State if you want to plot an exaggerate deformed configuration (Y/N): ").lower()
             
-            if exaggeration_ON == "Y":
+            if exaggeration_ON == "y":
                 
                 exaggerationFactor = float_precision(input("Enter the desired exaggeration factor (can be integer of float): "))
             
         else:
             
             deformed = False
-            
-        Var_index = [i for i, x in enumerate(self.Var_list) if x == Var][0]
         
-        colorbar_label = self.Var_list[Var_index] + ' ' + self.Var_units_list[Var_index]
+        colorbar_label = self.Var_dict[Var]["Name"] + ' ' + self.Var_dict[Var]["Units"]
         
-        if Var[0] == 'U':
+        if Var[0] == 'u':
             
-            if Var == 'Ux':
+            if Var == 'ux':
                 
                 Var_plot = U[:Mesh.num_nodes].copy()
             
-            elif Var == 'Uy':
+            elif Var == 'uy':
                 
                 Var_plot = U[Mesh.num_nodes:].copy()     
                 
-            elif Var == 'U_abs':
+            elif Var == 'u_abs':
                 
                 Var_plot = np.sqrt(U[:Mesh.num_nodes] ** 2 + U[Mesh.num_nodes:] ** 2)
         
-        elif Var[0] == 'S':
+        elif Var[0] == 's':
+                
+            if len(Gauss_points_vals) == 1.0:
+    
+                map_gauss_points_to_nodes = np.ones((Mesh.elem_nDOFs // 2, 1), float_precision)
+
+            else:
+
+                if Mesh.elemType["shape"] == "quad":
+                    
+                    A = []
+                    
+                    for j in range(len(Gauss_points_vals)):
+                        for k in range(len(Gauss_points_vals)):
+                            
+                            A.append(np.array([1.0, Gauss_points_vals[j], Gauss_points_vals[k], Gauss_points_vals[j] * Gauss_points_vals[k]], float_precision))
+                        
+                    A  = np.stack(A)
+                    
+                    if Mesh.elemType["order"] == "linear":
+                    
+                        ksi_h_pairs = np.array([[-1.0, -1.0],
+                                                [1.0, -1.0],
+                                                [1.0, 1.0],
+                                                [-1.0, 1.0]], float_precision)
+                    
+                    elif Mesh.elemType["order"] == "second order":
+                    
+                        ksi_h_pairs = np.array([[-1.0, -1.0],
+                                                [1.0, -1.0],
+                                                [1.0, 1.0],
+                                                [-1.0, 1.0],
+                                                [0.0, -1.0],
+                                                [1.0, 0.0],
+                                                [0.0, 1.0],
+                                                [-1.0, 0.0]], float_precision)
+                        
+                    B = []
+                    
+                    for ksi, h in ksi_h_pairs:
+                        
+                        B.append([1, ksi, h, ksi * h])
+    
+                    B = np.stack(B)
+                    
+                    map_gauss_points_to_nodes = B @ np.linalg.pinv(A)
             
-            if Mesh.elemType['shape'] == 'Quad':
+            sxx = np.zeros(Mesh.num_nodes, float_precision)
+            
+            syy = np.zeros(Mesh.num_nodes, float_precision)
+            
+            sxy = np.zeros(Mesh.num_nodes, float_precision)
+            
+            for elem in Mesh.elems_to_nodes:
                 
-                N_Gauss_points = np.zeros((len(Gauss_points_vals) ** 2, len(Gauss_points_vals) ** 2), float_precision)
+                sxx_Gauss_points = np.zeros(len(Gauss_points_vals) ** 2, )
                 
-                sxx = np.zeros(Mesh.num_nodes, float_precision)
+                syy_Gauss_points = np.zeros(len(Gauss_points_vals) ** 2, )
                 
-                syy = np.zeros(Mesh.num_nodes, float_precision)
+                sxy_Gauss_points = np.zeros(len(Gauss_points_vals) ** 2, )
                 
-                sxy = np.zeros(Mesh.num_nodes, float_precision)
+                X = Mesh.nodal_coords[elem]
                 
-                for elem in Mesh.elems_to_nodes:
-                    
-                    sxx_Gauss_points = np.zeros(len(Gauss_points_vals) ** 2, )
-                    
-                    syy_Gauss_points = np.zeros(len(Gauss_points_vals) ** 2, )
-                    
-                    sxy_Gauss_points = np.zeros(len(Gauss_points_vals) ** 2, )
-                    
-                    X = Mesh.nodal_coords[elem]
-                    
-                    for i in range(len(Gauss_points_vals)):
-                        for j in range(len(Gauss_points_vals)):
+                for i in range(len(Gauss_points_vals)):
+                    for j in range(len(Gauss_points_vals)):
+                        
+                        dN_dksi_dh = Mesh.dN_dksi_dh_function(Gauss_points_vals[i], Gauss_points_vals[j])
+                        
+                        J = Mesh.J_matrix_assembly(dN_dksi_dh, X)
+                        
+                        B = Mesh.B_matrix_assembly(dN_dksi_dh, J)
+                        
+                        sxx_Gauss_points[len(Gauss_points_vals) * i + j], syy_Gauss_points[len(Gauss_points_vals) * i + j], sxy_Gauss_points[len(Gauss_points_vals) * i + j] = C_e @ B @ np.concatenate([U[elem], U[elem + Mesh.num_nodes]])
+                        
+                sxx[elem] += map_gauss_points_to_nodes @ sxx_Gauss_points
+                
+                syy[elem] += map_gauss_points_to_nodes @ syy_Gauss_points
+                
+                sxy[elem] += map_gauss_points_to_nodes @ sxy_Gauss_points
                             
-                            N_Gauss_points[len(Gauss_points_vals) * i + j] = Mesh.N_function(Gauss_points_vals[i], Gauss_points_vals[j])[0, :4]
-                            
-                            dN_dksi_dh = Mesh.dN_dksi_dh_function(Gauss_points_vals[i], Gauss_points_vals[j])
-                            
-                            J = Mesh.J_matrix_assembly(dN_dksi_dh, X)
-                            
-                            B = Mesh.B_matrix_assembly(dN_dksi_dh, J)
-                            
-                            sxx_Gauss_points[len(Gauss_points_vals) * i + j], syy_Gauss_points[len(Gauss_points_vals) * i + j], sxy_Gauss_points[len(Gauss_points_vals) * i + j] = (C_e @ B @ np.concatenate([U[elem], U[elem + Mesh.num_nodes]]).reshape(-1, 1)).reshape(-1)
-                    
-                    inv_N_Gauss_points = np.linalg.inv(N_Gauss_points)
-                            
-                    sxx[elem] += (inv_N_Gauss_points @ sxx_Gauss_points.reshape(-1, 1)).reshape(-1)
-                    
-                    syy[elem] += (inv_N_Gauss_points @ syy_Gauss_points.reshape(-1, 1)).reshape(-1)
-                    
-                    sxy[elem] += (inv_N_Gauss_points @ sxy_Gauss_points.reshape(-1, 1)).reshape(-1)
-                            
-            if Var == 'Sxx':
+            if Var == 'sxx':
                 
                 Var_plot = sxx.copy()
                 
-            elif Var == 'Syy':
+            elif Var == 'syy':
                 
                 Var_plot = syy.copy()
                 
-            elif Var == 'Sxy':
+            elif Var == 'sxy':
                 
                 Var_plot = sxy.copy()
                 
-            elif Var == 'S_VonMises':
+            elif Var == 's_vonmises':
                 
                 Var_plot = np.sqrt(sxx ** 2 + syy ** 2 - sxx * syy + 3 * (sxy ** 2))
                             
@@ -868,14 +1240,24 @@ class Post_processing2D:
             
             nodal_coords_new = np.concatenate([(Mesh.nodal_coords[:, 0] + U[:Mesh.num_nodes] * exaggerationFactor).reshape(-1, 1), (Mesh.nodal_coords[:, 1] + U[Mesh.num_nodes:] * exaggerationFactor).reshape(-1, 1)], axis = 1)
              
-        fig = plt.figure(Var_index + 3, figsize = (40, 40 * (Mesh.H / Mesh.W)))
+        fig = plt.figure(list(self.Var_dict.keys()).index(Var) + 3, figsize = (40, 40 * (Mesh.H / Mesh.W)))
         ax = plt.axes()
         
         if show_mesh == True:
             
             for elem in Mesh.elems_to_nodes:
 
-                plt.plot(np.append(nodal_coords_new[elem, 0], nodal_coords_new[elem[0], 0]), np.append(nodal_coords_new[elem, 1], nodal_coords_new[elem[0], 1]), linewidth = 1, color = "black")
+                if len(elem) in (4, 8):
+                    
+                    corner_nodes = elem[:4].copy()
+                    
+                    mid_nodes = elem[4:].copy()
+                    
+                    plt.plot(np.append(Mesh.nodal_coords[corner_nodes, 0], Mesh.nodal_coords[corner_nodes[0], 0]), np.append(Mesh.nodal_coords[corner_nodes, 1], Mesh.nodal_coords[corner_nodes[0], 1]), linewidth = 1, linestyle = "-", marker = "o", color = "black")
+            
+                    if len(mid_nodes) != 0:
+                        
+                        plt.plot(Mesh.nodal_coords[mid_nodes, 0], Mesh.nodal_coords[mid_nodes, 1], linestyle = "none", marker = "o", color = "black")
 
         im = plt.scatter(nodal_coords_new[:, 0], nodal_coords_new[:, 1], s = 100, c = Var_plot, cmap = self.my_cmap)
         
@@ -889,7 +1271,9 @@ class Post_processing2D:
         plt.ylabel('y', fontsize = self.fontsize, fontweight = 'bold')
         
         ax.margins(0.0)
-        ax.set_aspect("equal", adjustable="box")   
+        ax.set_aspect("equal", adjustable="box")
+        
+        self.save_plot()
         
         return;     
 ###############################################################################
@@ -906,12 +1290,12 @@ H, W, D = get_domain_geometry(float_precision)
 
 ##----------------------------Material properties----------------------------##
 ###############################################################################
-E, v = get_material_properties(float_precision)
+Mat = get_material_properties(float_precision)
 ###############################################################################
 
 ##---------------------------------Meshing-----------------------------------##
 ###############################################################################
-Mesh = generate_Mesh(H, W, E, v, int_precision, float_precision)
+Mesh = generate_Mesh(H, W, int_precision, float_precision)
 ###############################################################################
 
 ##--------------------------Gauss points selection---------------------------##
@@ -921,7 +1305,7 @@ Gauss_points = Gauss_points_selection_2D(float_precision)
 
 ##---------------------------Stifness matrix assembly------------------------##
 ###############################################################################
-C_e, K = Global_Stifness_matrix_assembly_2D(E, v, D, Mesh, Gauss_points, float_precision)
+C_e, K = Global_Stifness_matrix_assembly_2D(Mat, D, Mesh, Gauss_points, float_precision)
 ###############################################################################
 
 ##----------Constraints/Boundary conditions - Force vector assembly----------##
@@ -975,7 +1359,7 @@ Post_processor.plotVar(Mesh, C_e, U, Gauss_points, float_precision)
 Post_processor.plotVar(Mesh, C_e, U, Gauss_points, float_precision)
 #----------------------------------------------------------------------------##
 ###############################################################################
-###############################################################################
+
 
 
 
