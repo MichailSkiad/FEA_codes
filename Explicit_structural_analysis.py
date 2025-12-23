@@ -783,7 +783,7 @@ def get_time_step_and_simulation_time(cL, Mesh, fc, Nc, t_pulse, Amp_pulse, floa
 
 ##---------------------Gauss points selection function-----------------------##
 ###############################################################################
-def Gauss_points_selection_2D(float_precision):
+def Gauss_points_selection_2D(Mesh, float_precision):
     
     valind_n_Gauss_points = [1, 2, 3]
     
@@ -1813,7 +1813,7 @@ dt, t_end, t_sim, Amp_pulse_interp = get_time_step_and_simulation_time(cL, Mesh,
 
 ##--------------------------Gauss points selection---------------------------##
 ###############################################################################
-Gauss_points = Gauss_points_selection_2D(float_precision)
+Gauss_points = Gauss_points_selection_2D(Mesh, float_precision)
 ###############################################################################
 
 ##----------------------------Mass matrix assembly---------------------------##
@@ -1883,6 +1883,7 @@ Post_processor.plotVar(Mesh, C_e, U_t, t_sim, t_end, Gauss_points, int_precision
 Post_processor.plotTimeResponse(Mesh, C_e, U_t, t_sim, t_end, Gauss_points, int_precision, float_precision)
 ###############################################################################
 ###############################################################################
+
 
 
 
