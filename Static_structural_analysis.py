@@ -603,7 +603,7 @@ def generate_Mesh(H, W, int_precision, float_precision):
 
 ##---------------------Gauss points selection function-----------------------##
 ###############################################################################
-def Gauss_points_selection_2D(float_precision):
+def Gauss_points_selection_2D(Mesh, float_precision):
     
     valind_n_Gauss_points = [1, 2, 3]
     
@@ -1300,7 +1300,7 @@ Mesh = generate_Mesh(H, W, int_precision, float_precision)
 
 ##--------------------------Gauss points selection---------------------------##
 ###############################################################################
-Gauss_points = Gauss_points_selection_2D(float_precision)
+Gauss_points = Gauss_points_selection_2D(Mesh, float_precision)
 ###############################################################################
 
 ##---------------------------Stifness matrix assembly------------------------##
@@ -1359,6 +1359,7 @@ Post_processor.plotVar(Mesh, C_e, U, Gauss_points, float_precision)
 Post_processor.plotVar(Mesh, C_e, U, Gauss_points, float_precision)
 #----------------------------------------------------------------------------##
 ###############################################################################
+
 
 
 
